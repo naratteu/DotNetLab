@@ -1,0 +1,59 @@
+name: Pages
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ aspnet-server ]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: eng/portal-bridge/go.mod
+          cache-dependency-path: eng/portal-bridge/go.sum
+
+      - name: Build the Portal connector
+        run: eng/portal-bridge/build.sh
+
+      # The site is served from https://<owner>.github.io/<repository>/.
+      - name: Set the base path
+        run: sed -i 's|<base href="/" />|<base href="/${{ github.event.repository.name }}/" />|' src/WebAssembly/wwwroot/index.html
+
+      - name: Publish
+        run: dotnet publish -o output src/WebAssembly -noAutoResponse
+
+      - name: Check publish output
+        run: dotnet run --file eng/check-publish-output.cs -- output
+
+      # Jekyll would drop `_framework` and `_content`.
+      - run: touch output/wwwroot/.nojekyll
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: output/wwwroot
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
