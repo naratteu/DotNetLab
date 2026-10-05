@@ -230,7 +230,8 @@ internal sealed class WorkerController : IAsyncDisposable
 
         var workerReady = new TaskCompletionSource();
         var worker = WorkerControllerInterop.CreateWorker(
-            scriptUrl: getWorkerUrl("../_content/DotNetLab.WorkerWebAssembly/main.js", [hostEnvironment.BaseAddress, logging.LogLevel.ToString()]),
+            // Workers resolve relative URLs against the page, so this must not go above the app's base (e.g., on GitHub Pages).
+            scriptUrl: getWorkerUrl(new Uri(new Uri(hostEnvironment.BaseAddress), "_content/DotNetLab.WorkerWebAssembly/main.js").AbsoluteUri, [hostEnvironment.BaseAddress, logging.LogLevel.ToString()]),
             messageHandler: void (string data) =>
             {
                 dispatcher.InvokeAsync(async () =>
