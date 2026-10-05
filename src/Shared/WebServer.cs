@@ -44,6 +44,18 @@ public static partial class WebServer
     public static bool IsRunning => handler != null;
 
     /// <summary>
+    /// Whether the code has <c>#:sdk Microsoft.NET.Sdk.Web</c>. Outputs of such programs (like the public URL)
+    /// are valid only while their run lasts, so they must not be cached or shared.
+    /// </summary>
+    public static bool IsWebProgram(IEnumerable<string> texts)
+    {
+        return texts.Any(static text => WebSdkDirective().IsMatch(text));
+    }
+
+    [GeneratedRegex(@"^\s*#:sdk\s+Microsoft\.NET\.Sdk\.Web\b", RegexOptions.Multiline | RegexOptions.IgnoreCase)]
+    private static partial Regex WebSdkDirective();
+
+    /// <summary>
     /// Stops the previous server so that the next run starts from a clean slate.
     /// </summary>
     public static async Task StopAsync()

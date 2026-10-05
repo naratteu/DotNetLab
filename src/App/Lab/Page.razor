@@ -1235,6 +1235,12 @@
             return;
         }
 
+        // Outputs of web programs (like the server's URL) outlive their run only in the cache.
+        if (WebServer.IsWebProgram(state.Inputs.Select(static i => i.Text)))
+        {
+            return;
+        }
+
         _ = Cache.StoreAsync(state, output);
     }
 
@@ -1638,7 +1644,9 @@
 
     private async Task TryLoadFromCacheAsync(SavedState state, bool updateOutput)
     {
-        var result = await Cache.LoadAsync(state);
+        var result = WebServer.IsWebProgram(state.Inputs.Select(static i => i.Text))
+            ? null
+            : await Cache.LoadAsync(state);
         if (result is var (output, timestamp))
         {
             await TrySetCompiledFromCacheAsync(state.GetCompilerConfiguration(), state.ToCompilationInput(), output, new(timestamp), updateOutput: updateOutput);
