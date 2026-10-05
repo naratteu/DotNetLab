@@ -1,6 +1,8 @@
 // Exposes the server of the running DotNetLab program on a Portal relay (https://github.com/gosuda/portal-tunnel).
 // The Go connector (eng/portal-bridge) calls dotnetlabPortalHandle for each visit,
 // which is forwarded to .NET (src/Shared/WebServer.cs) and answered through respond().
+// WebSockets go the same way: dotnetlabPortalSocket opens one (answered by socketOpened()),
+// then messages flow through dotnetlabPortalSocketSend and socketMessage().
 
 const REGISTRY_URL = 'https://raw.githubusercontent.com/gosuda/portal-tunnel/main/registry.json';
 const PROBE_TIMEOUT_MS = 5000;
@@ -13,6 +15,8 @@ let connector = null;
 /** @type {Map<string, Promise<string>>} public URL per relay */
 const exposures = new Map();
 const pending = new Map();
+/** @type {Map<number, { onMessage: (text: boolean, data: Uint8Array) => void, onClose: (code: number, reason: string) => void }>} */
+const sockets = new Map();
 let nextId = 0;
 // Keeps the public address the same for the lifetime of this tab.
 const name = crypto.randomUUID();
@@ -23,19 +27,96 @@ globalThis.dotnetlabPortalHandle = (request) => new Promise((resolve) => {
         return;
     }
     const id = nextId++;
-    pending.set(id, resolve);
+    pending.set(id, { resolve });
+    onRequest(JSON.stringify({
+        id,
+        kind: 'http',
+        method: request.method,
+        url: request.url,
+        headers: flattenHeaders(request),
+        body: toBase64(request.body),
+    }));
+});
+
+function flattenHeaders(request) {
     const headers = ['Host', request.host];
     for (let i = 0; i < request.headers.length; i++) {
         headers.push(request.headers[i][0], request.headers[i][1]);
     }
+    return headers;
+}
+
+globalThis.dotnetlabPortalSocket = (request, onMessage, onClose) => new Promise((resolve, reject) => {
+    if (!onRequest) {
+        reject(new Error('No server is running.'));
+        return;
+    }
+    const id = nextId++;
+    pending.set(id, { resolve, reject });
+    sockets.set(id, { onMessage, onClose });
     onRequest(JSON.stringify({
         id,
+        kind: 'websocket',
         method: request.method,
         url: request.url,
-        headers,
-        body: toBase64(request.body),
+        headers: flattenHeaders(request),
+        protocols: [...request.protocols],
+        body: '',
     }));
 });
+
+globalThis.dotnetlabPortalSocketSend = (id, text, data) => {
+    if (sockets.has(id)) {
+        onRequest?.(JSON.stringify({ id, kind: 'send', text, body: toBase64(data) }));
+    }
+};
+
+globalThis.dotnetlabPortalSocketClose = (id, code, reason) => {
+    if (sockets.delete(id)) {
+        onRequest?.(JSON.stringify({ id, kind: 'close', code, reason }));
+    }
+};
+
+/**
+ * @param {number} id
+ * @param {string} protocol empty if none
+ */
+export function socketOpened(id, protocol) {
+    const opening = pending.get(id);
+    pending.delete(id);
+    opening?.resolve({ id, protocol: protocol || null });
+}
+
+/**
+ * @param {number} id
+ * @param {string} message
+ */
+export function socketFailed(id, message) {
+    const opening = pending.get(id);
+    pending.delete(id);
+    sockets.delete(id);
+    opening?.reject(new Error(message));
+}
+
+/**
+ * @param {number} id
+ * @param {boolean} text
+ * @param {Uint8Array} data
+ */
+export function socketMessage(id, text, data) {
+    sockets.get(id)?.onMessage(text, new Uint8Array(data));
+}
+
+/**
+ * @param {number} id
+ * @param {number} code
+ * @param {string} reason
+ */
+export function socketClosed(id, code, reason) {
+    const socket = sockets.get(id);
+    sockets.delete(id);
+    socket?.onClose(code, reason);
+}
 
 /**
  * @param {number} id
@@ -44,7 +125,7 @@ globalThis.dotnetlabPortalHandle = (request) => new Promise((resolve) => {
  * @param {Uint8Array} body
  */
 export function respond(id, status, headersJson, body) {
-    const resolve = pending.get(id);
+    const resolve = pending.get(id)?.resolve;
     pending.delete(id);
     const flat = JSON.parse(headersJson);
     const headers = [];

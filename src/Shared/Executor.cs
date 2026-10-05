@@ -5,6 +5,9 @@ using System.Reflection.Metadata;
 using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Loader;
+using Handler = System.Func<string, string, string[], byte[], System.Threading.Tasks.Task<(int, string[], byte[])>>;
+using SocketOpener = System.Func<string, string[], string[], System.Action<bool, byte[]>, System.Action<int, string>,
+    System.Threading.Tasks.Task<(string?, System.Func<bool, byte[], System.Threading.Tasks.Task>, System.Func<int, string, System.Threading.Tasks.Task>)>>;
 
 namespace DotNetLab;
 
@@ -28,12 +31,13 @@ public static class Executor
                 ?? throw new ArgumentException("No entry point found in the assembly.");
 
             // Programs using `#:sdk Microsoft.NET.Sdk.Web` signal when their server has started.
-            TaskCompletionSource<Func<string, string, string[], byte[], Task<(int, string[], byte[])>>>? serverStarted = null;
+            TaskCompletionSource<(Handler, SocketOpener)>? serverStarted = null;
             if (assembly.GetType(WebServer.ShimTypeName) != null)
             {
                 serverStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
-                AppContext.SetData(WebServer.StartedKey, new Action<Func<string, string, string[], byte[], Task<(int, string[], byte[])>>>(
-                    handler => serverStarted.TrySetResult(handler)));
+                AppContext.SetData(WebServer.StartedKey, new Action<Handler, SocketOpener>(
+                    (handler, socketOpener) => serverStarted.TrySetResult((handler, socketOpener))));
+                WebServer.Prepare();
             }
 
             int exitCode = 0;
@@ -51,11 +55,11 @@ public static class Executor
                         var entryPointTask = InvokeEntryPointCoreAsync(entryPoint);
 
                         if (serverStarted != null &&
-                            await WaitForServerAsync(entryPointTask, serverStarted.Task) is { } handler)
+                            await WaitForServerAsync(entryPointTask, serverStarted.Task) is (var handler, var socketOpener))
                         {
                             // The server keeps running after this run reports its output.
                             keepLoaded = true;
-                            WebServer.Adopt(handler, alc);
+                            WebServer.Adopt(handler, socketOpener, alc);
                             var relay = assembly.GetCustomAttributes<AssemblyMetadataAttribute>()
                                 .FirstOrDefault(static a => a.Key == WebServer.RelayMetadataKey)?.Value;
                             var url = await WebServer.ExposeAsync(relay);
@@ -94,6 +98,7 @@ public static class Executor
             {
                 AppContext.SetData(WebServer.StartedKey, null);
                 AppContext.SetData(WebServer.RunningKey, null);
+                AppContext.SetData(WebServer.AssetsKey, null);
                 if (AppContext.GetData(WebServer.StopKey) is Func<Task> stop)
                 {
                     AppContext.SetData(WebServer.StopKey, null);
@@ -106,11 +111,11 @@ public static class Executor
     }
 
     /// <returns>
-    /// The request handler of the started server or <see langword="null"/> if the program finished without one.
+    /// The request and WebSocket handlers of the started server or <see langword="null"/> if the program finished without one.
     /// </returns>
-    private static async Task<Func<string, string, string[], byte[], Task<(int, string[], byte[])>>?> WaitForServerAsync(
+    private static async Task<(Handler, SocketOpener)?> WaitForServerAsync(
         Task entryPoint,
-        Task<Func<string, string, string[], byte[], Task<(int, string[], byte[])>>> started)
+        Task<(Handler, SocketOpener)> started)
     {
         await Task.WhenAny(entryPoint, started);
 

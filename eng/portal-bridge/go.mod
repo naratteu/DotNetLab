@@ -2,7 +2,10 @@ module portalbridge
 
 go 1.27.0
 
-require github.com/gosuda/portal-tunnel/v2 v2.5.2-0.20261002024317-7f68a4e7a19a
+require (
+	github.com/gorilla/websocket v1.5.3
+	github.com/gosuda/portal-tunnel/v2 v2.5.2-0.20261002024317-7f68a4e7a19a
+)
 
 require (
 	github.com/coder/websocket v1.8.15 // indirect

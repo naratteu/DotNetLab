@@ -68,7 +68,7 @@ internal abstract partial class FileLevelDirective
                     }),
                     WebSdk.RuntimeTargetFramework,
                     loadForExecution: true,
-                    runtimeIdentifier: WebSdk.RuntimePackIdentifier);
+                    folder: new($"runtimes/{WebSdk.RuntimePackIdentifier}/lib/{WebSdk.RuntimeTargetFramework}", ".dll"));
                 var testHostTask = downloader.DownloadAsync(
                     new Set<NuGetDependency>(new HashSet<NuGetDependency>
                     {
@@ -76,9 +76,28 @@ internal abstract partial class FileLevelDirective
                     }),
                     WebSdk.RuntimeTargetFramework,
                     loadForExecution: true);
+                // Blazor scripts like `_framework/blazor.web.js` which are normally served from the build output.
+                var assetsTask = downloader.DownloadAsync(
+                    new Set<NuGetDependency>(new HashSet<NuGetDependency>
+                    {
+                        new() { PackageId = "Microsoft.AspNetCore.App.Internal.Assets", VersionRange = WebSdk.RuntimeVersionRange },
+                    }),
+                    WebSdk.RuntimeTargetFramework,
+                    loadForExecution: false,
+                    folder: new("_framework", ".js"));
 
                 var runtime = await runtimeTask;
                 var testHost = await testHostTask;
+                var assets = await assetsTask;
+
+                if (assets.Errors.Count > 0)
+                {
+                    context.Logger.LogWarning("Could not download Blazor scripts: {Errors}", assets.Errors.Values.SelectMany(e => e).JoinToString("; "));
+                }
+
+                WebServer.FrameworkAssets = assets.Assemblies.IsDefaultOrEmpty
+                    ? ImmutableDictionary<string, ImmutableArray<byte>>.Empty
+                    : assets.Assemblies.ToImmutableDictionary(static a => $"_framework/{a.Name}.js", static a => a.Bytes);
 
                 foreach (var errors in runtime.Errors.Values.Concat(testHost.Errors.Values))
                 {
@@ -303,8 +322,13 @@ internal static class WebSdk
                 using System.Collections.Generic;
                 using System.Diagnostics;
                 using System.IO;
+                using System.Net.WebSockets;
+                using System.Security.Cryptography;
                 using System.Threading;
                 using System.Threading.Tasks;
+                using Microsoft.AspNetCore.Builder;
+                using Microsoft.AspNetCore.DataProtection;
+                using Microsoft.AspNetCore.Hosting;
                 using Microsoft.AspNetCore.Hosting.Server;
                 using Microsoft.AspNetCore.Http;
                 using Microsoft.AspNetCore.TestHost;
@@ -320,13 +344,26 @@ internal static class WebSdk
                     [System.Runtime.CompilerServices.ModuleInitializer]
                     internal static void Initialize()
                     {
-                        if (AppContext.GetData("{{WebServer.StartedKey}}") is not Action<{{WebServer.HandlerType}}>)
+                        if (AppContext.GetData("{{WebServer.StartedKey}}") is not Action<{{WebServer.HandlerType}}, {{WebServer.SocketOpenerType}}>)
                         {
                             return;
                         }
 
                         AppContext.SetData("{{WebServer.StopKey}}", new Func<Task>(StopAsync));
                         subscription = DiagnosticListener.AllListeners.Subscribe(new ListenerObserver());
+
+                        // `MapStaticAssets()` throws without the manifest from the build output.
+                        // An empty one makes `@Assets[...]` return paths as they are, which the middleware below serves.
+                        try
+                        {
+                            var name = System.Reflection.Assembly.GetEntryAssembly()?.GetName().Name;
+                            var manifest = Path.Combine(AppContext.BaseDirectory, name + ".staticwebassets.endpoints.json");
+                            if (name != null && !File.Exists(manifest))
+                            {
+                                File.WriteAllText(manifest, "{\"Version\":1,\"ManifestType\":\"Build\",\"Endpoints\":[]}");
+                            }
+                        }
+                        catch { }
                     }
 
                     /// <summary>
@@ -356,6 +393,17 @@ internal static class WebSdk
                         {
                             services.AddSingleton<IServer, TestServer>();
                             services.AddSingleton<IHostLifetime, NoopLifetime>();
+                            services.AddSingleton<IStartupFilter, FrameworkAssetsStartupFilter>();
+                            // The default data protection uses AES, which the browser does not have.
+                            services.AddSingleton<IDataProtectionProvider>(new HmacDataProtector(RandomNumberGenerator.GetBytes(32), ""));
+                            for (int i = services.Count - 1; i >= 0; i--)
+                            {
+                                if (services[i].ServiceType == typeof(IHostedService) &&
+                                    services[i].ImplementationType?.Name == "DataProtectionHostedService")
+                                {
+                                    services.RemoveAt(i);
+                                }
+                            }
                             // The console logger writes from a thread, which the browser does not have.
                             services.AddLogging(static logging =>
                             {
@@ -371,9 +419,11 @@ internal static class WebSdk
                         host.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStarted.Register(() =>
                         {
                             if (host.Services.GetService<IServer>() is TestServer server &&
-                                AppContext.GetData("{{WebServer.StartedKey}}") is Action<{{WebServer.HandlerType}}> started)
+                                AppContext.GetData("{{WebServer.StartedKey}}") is Action<{{WebServer.HandlerType}}, {{WebServer.SocketOpenerType}}> started)
                             {
-                                started((method, url, headers, body) => HandleAsync(server, method, url, headers, body));
+                                started(
+                                    (method, url, headers, body) => HandleAsync(server, method, url, headers, body),
+                                    (url, headers, protocols, onMessage, onClose) => OpenSocketAsync(server, url, headers, protocols, onMessage, onClose));
                             }
                         });
                     }
@@ -426,6 +476,94 @@ internal static class WebSdk
                         return (context.Response.StatusCode, responseHeaders.ToArray(), responseBody.ToArray());
                     }
 
+                    private static async Task<(string?, Func<bool, byte[], Task>, Func<int, string, Task>)> OpenSocketAsync(
+                        TestServer server, string url, string[] headers, string[] protocols, Action<bool, byte[]> onMessage, Action<int, string> onClose)
+                    {
+                        var host = "localhost";
+                        for (int i = 0; i + 1 < headers.Length; i += 2)
+                        {
+                            if (string.Equals(headers[i], "Host", StringComparison.OrdinalIgnoreCase))
+                            {
+                                host = headers[i + 1];
+                            }
+                        }
+
+                        var client = server.CreateWebSocketClient();
+                        client.ConfigureRequest = request =>
+                        {
+                            for (int i = 0; i + 1 < headers.Length; i += 2)
+                            {
+                                var name = headers[i];
+                                // The test client does its own handshake.
+                                if (string.Equals(name, "Host", StringComparison.OrdinalIgnoreCase) ||
+                                    string.Equals(name, "Upgrade", StringComparison.OrdinalIgnoreCase) ||
+                                    string.Equals(name, "Connection", StringComparison.OrdinalIgnoreCase) ||
+                                    name.StartsWith("Sec-WebSocket-", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    continue;
+                                }
+
+                                request.Headers.Append(name, headers[i + 1]);
+                            }
+                        };
+                        foreach (var protocol in protocols)
+                        {
+                            client.SubProtocols.Add(protocol);
+                        }
+
+                        var socket = await client.ConnectAsync(new Uri("wss://" + host + url), CancellationToken.None);
+                        _ = ReceiveAsync(socket, onMessage, onClose);
+
+                        // WebSocket does not allow concurrent sends.
+                        var sending = Task.CompletedTask;
+                        Func<bool, byte[], Task> send = (text, data) => sending = SendAfterAsync(sending, socket, text, data);
+                        Func<int, string, Task> close = async (code, reason) =>
+                        {
+                            try
+                            {
+                                var status = code is >= 1000 and < 5000 and not (1005 or 1006 or 1015) ? (WebSocketCloseStatus)code : WebSocketCloseStatus.NormalClosure;
+                                await socket.CloseOutputAsync(status, reason, CancellationToken.None);
+                            }
+                            catch { }
+                        };
+                        return (socket.SubProtocol, send, close);
+                    }
+
+                    private static async Task SendAfterAsync(Task previous, WebSocket socket, bool text, byte[] data)
+                    {
+                        try { await previous; } catch { }
+                        await socket.SendAsync(new ArraySegment<byte>(data), text ? WebSocketMessageType.Text : WebSocketMessageType.Binary, true, CancellationToken.None);
+                    }
+
+                    private static async Task ReceiveAsync(WebSocket socket, Action<bool, byte[]> onMessage, Action<int, string> onClose)
+                    {
+                        var buffer = new byte[16 * 1024];
+                        using var message = new MemoryStream();
+                        try
+                        {
+                            while (true)
+                            {
+                                var result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+                                if (result.MessageType == WebSocketMessageType.Close)
+                                {
+                                    onClose((int)(socket.CloseStatus ?? WebSocketCloseStatus.NormalClosure), socket.CloseStatusDescription ?? "");
+                                    return;
+                                }
+
+                                message.Write(buffer, 0, result.Count);
+                                if (result.EndOfMessage)
+                                {
+                                    onMessage(result.MessageType == WebSocketMessageType.Text, message.ToArray());
+                                    message.SetLength(0);
+                                }
+                            }
+                        }
+                        catch
+                        {
+                            onClose((int)WebSocketCloseStatus.InternalServerError, "");
+                        }
+                    }
+
                     private sealed class ListenerObserver : IObserver<DiagnosticListener>
                     {
                         public void OnNext(DiagnosticListener listener)
@@ -457,6 +595,100 @@ internal static class WebSdk
 
                         public void OnCompleted() { }
                         public void OnError(Exception error) { }
+                    }
+
+                    /// <summary>
+                    /// Serves static files of the framework (like <c>_framework/blazor.web.js</c>) which are normally in the build output.
+                    /// </summary>
+                    private sealed class FrameworkAssetsStartupFilter : IStartupFilter
+                    {
+                        public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next) => app =>
+                        {
+                            var assets = AppContext.GetData("{{WebServer.AssetsKey}}") as Func<string, byte[]?>;
+                            app.Use(async (context, nextMiddleware) =>
+                            {
+                                if (assets != null &&
+                                    context.Request.Path.StartsWithSegments("/_framework") &&
+                                    assets(context.Request.Path.Value!.TrimStart('/')) is { } bytes)
+                                {
+                                    context.Response.ContentType = "text/javascript; charset=utf-8";
+                                    context.Response.ContentLength = bytes.Length;
+                                    await context.Response.Body.WriteAsync(bytes);
+                                    return;
+                                }
+
+                                await nextMiddleware(context);
+                            });
+                            next(app);
+                        };
+                    }
+
+                    /// <summary>
+                    /// Encrypts with HMAC-SHA256 as a pseudorandom function in counter mode and authenticates
+                    /// with another HMAC-SHA256 key (encrypt-then-MAC). Keys live only as long as the server.
+                    /// </summary>
+                    private sealed class HmacDataProtector : IDataProtector
+                    {
+                        private const int NonceSize = 16;
+                        private const int TagSize = 32;
+                        private readonly byte[] masterKey;
+                        private readonly string purposes;
+                        private readonly byte[] encryptionKey;
+                        private readonly byte[] signingKey;
+
+                        public HmacDataProtector(byte[] masterKey, string purposes)
+                        {
+                            this.masterKey = masterKey;
+                            this.purposes = purposes;
+                            encryptionKey = HMACSHA256.HashData(masterKey, System.Text.Encoding.UTF8.GetBytes("encrypt\0" + purposes));
+                            signingKey = HMACSHA256.HashData(masterKey, System.Text.Encoding.UTF8.GetBytes("sign\0" + purposes));
+                        }
+
+                        public IDataProtector CreateProtector(string purpose) => new HmacDataProtector(masterKey, purposes + "\0" + purpose);
+
+                        public byte[] Protect(byte[] plaintext)
+                        {
+                            var output = new byte[NonceSize + plaintext.Length + TagSize];
+                            RandomNumberGenerator.Fill(output.AsSpan(0, NonceSize));
+                            Xor(output.AsSpan(0, NonceSize), plaintext, output.AsSpan(NonceSize, plaintext.Length));
+                            HMACSHA256.HashData(signingKey, output.AsSpan(0, NonceSize + plaintext.Length), output.AsSpan(NonceSize + plaintext.Length));
+                            return output;
+                        }
+
+                        public byte[] Unprotect(byte[] protectedData)
+                        {
+                            if (protectedData.Length < NonceSize + TagSize)
+                            {
+                                throw new CryptographicException("The payload was invalid.");
+                            }
+
+                            var signed = protectedData.AsSpan(0, protectedData.Length - TagSize);
+                            var tag = HMACSHA256.HashData(signingKey, signed);
+                            if (!CryptographicOperations.FixedTimeEquals(tag, protectedData.AsSpan(signed.Length)))
+                            {
+                                throw new CryptographicException("The payload was invalid.");
+                            }
+
+                            var plaintext = new byte[signed.Length - NonceSize];
+                            Xor(signed.Slice(0, NonceSize), signed.Slice(NonceSize), plaintext);
+                            return plaintext;
+                        }
+
+                        private void Xor(ReadOnlySpan<byte> nonce, ReadOnlySpan<byte> input, Span<byte> output)
+                        {
+                            var block = new byte[NonceSize + 4];
+                            nonce.CopyTo(block);
+                            var stream = new byte[32];
+                            for (int offset = 0, counter = 0; offset < input.Length; offset += stream.Length, counter++)
+                            {
+                                System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(block.AsSpan(NonceSize), counter);
+                                HMACSHA256.HashData(encryptionKey, block, stream);
+                                for (int i = 0; i < stream.Length && offset + i < input.Length; i++)
+                                {
+                                    output[offset + i] = (byte)(input[offset + i] ^ stream[i]);
+                                }
+                            }
+                        }
                     }
 
                     private sealed class NoopLifetime : IHostLifetime

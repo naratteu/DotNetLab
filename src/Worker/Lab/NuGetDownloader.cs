@@ -119,15 +119,14 @@ internal sealed class NuGetDownloaderPlugin(
         Set<NuGetDependency> dependencies,
         string targetFramework,
         bool loadForExecution,
-        string? runtimeIdentifier = null)
+        NuGetFolder? folder = null)
     {
         var parsed = "empty".Equals(targetFramework, StringComparison.OrdinalIgnoreCase)
             ? NuGetFramework.AnyFramework
             : NuGetFramework.Parse(targetFramework);
-        // Runtime packs keep their DLLs under `runtimes/<rid>/lib/<tfm>/` instead of `lib/<tfm>/`.
-        NuGetDllFilter filter = runtimeIdentifier is null
-            ? ActivatorUtilities.CreateInstance<LibNuGetDllFilter>(services, parsed)
-            : new TargetFrameworkNuGetDllFilter($"runtimes/{runtimeIdentifier}/lib/{parsed.GetShortFolderName()}/", 4);
+        NuGetDllFilter filter = folder is { } f
+            ? new FolderNuGetFileFilter(f.Path, f.Extension)
+            : ActivatorUtilities.CreateInstance<LibNuGetDllFilter>(services, parsed);
         return nuGetDownloader.Value.DownloadAsync(dependencies, parsed, filter, loadForExecution);
     }
 }
@@ -842,6 +841,38 @@ internal sealed class TargetFrameworkNuGetDllFilter(string folder, int level) : 
     public override bool Equals(NuGetDllFilter? other)
     {
         return other is TargetFrameworkNuGetDllFilter && base.Equals(other);
+    }
+}
+
+/// <summary>
+/// Files directly in a folder, e.g., DLLs of runtime packs (which are under <c>runtimes/&lt;rid&gt;/lib/&lt;tfm&gt;/</c>)
+/// or static files.
+/// </summary>
+internal sealed class FolderNuGetFileFilter(string folder, string extension) : NuGetDllFilter
+{
+    private readonly string prefix = folder.TrimEnd('/') + '/';
+    private readonly string extension = extension;
+
+    public override Func<string, bool> GetFilter(IEnumerable<string> allFiles, string forPackage) => Include;
+
+    private bool Include(string filePath)
+    {
+        return filePath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) &&
+            filePath.IndexOf('/', prefix.Length) < 0 &&
+            filePath.EndsWith(extension, StringComparison.OrdinalIgnoreCase) &&
+            !filePath.EndsWith(".resources.dll", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public override bool Equals(NuGetDllFilter? other)
+    {
+        return other is FolderNuGetFileFilter filter &&
+            string.Equals(prefix, filter.prefix, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(extension, filter.extension, StringComparison.OrdinalIgnoreCase);
+    }
+
+    public override int GetHashCode()
+    {
+        return HashCode.Combine(StringComparer.OrdinalIgnoreCase.GetHashCode(prefix), StringComparer.OrdinalIgnoreCase.GetHashCode(extension));
     }
 }
 

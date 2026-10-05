@@ -10,6 +10,8 @@ github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0/go.mod h1:ZXNYxsqcloTdSy/rNShjY
 github.com/go-jose/go-jose/v4 v4.1.4 h1:moDMcTHmvE6Groj34emNPLs/qtYXRVcd6S7NHbHz3kA=
 github.com/go-jose/go-jose/v4 v4.1.4/go.mod h1:x4oUasVrzR7071A4TnHLGSPpNOm2a21K9Kf04k1rs08=
 github.com/godbus/dbus/v5 v5.0.4/go.mod h1:xhWf0FNVPg57R7Z0UbKHbJfkEywrmjJnf7w5xrFpKfA=
+github.com/gorilla/websocket v1.5.3 h1:saDtZ6Pbx/0u+bgYQ3q96pZgCzfhKXGPqt7kZ72aNNg=
+github.com/gorilla/websocket v1.5.3/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
 github.com/gosuda/keyless_tls v0.0.4-0.20260919135918-b58f4ae3ae41 h1:ijG3C9ff8d/i9ycKT1bupWczSb2SmKPseapa4Fn9biU=
 github.com/gosuda/keyless_tls v0.0.4-0.20260919135918-b58f4ae3ae41/go.mod h1:Kymj8rE/o2D0LVW3dMiXd14P9aVr0wx3oAWO4jBThYo=
 github.com/gosuda/portal-tunnel/v2 v2.5.2-0.20261002024317-7f68a4e7a19a h1:UYRlO18hcbiqMDTIieW+E8IWclPWYJfoc05K3b09OBE=
