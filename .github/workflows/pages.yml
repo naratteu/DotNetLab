@@ -32,8 +32,15 @@ jobs:
         run: eng/portal-bridge/build.sh
 
       # The site is served from https://<owner>.github.io/<repository>/.
-      - name: Set the base path
-        run: sed -i 's|<base href="/" />|<base href="/${{ github.event.repository.name }}/" />|' src/WebAssembly/wwwroot/index.html
+      # It is a fork, so it links to itself and does not count visits for the original site.
+      - name: Adjust the page for this fork
+        run: |
+          sed -i \
+            -e 's|<base href="/" />|<base href="/${{ github.event.repository.name }}/" />|' \
+            -e 's|https://github.com/jjonescz/DotNetLab|https://github.com/${{ github.repository }}|' \
+            -e '/goatcounter\.com/d' \
+            eng/index.template.html
+          grep -q '<base href="/${{ github.event.repository.name }}/" />' eng/index.template.html
 
       - name: Publish
         run: dotnet publish -o output src/WebAssembly -noAutoResponse
