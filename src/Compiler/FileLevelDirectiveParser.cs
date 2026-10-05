@@ -31,6 +31,7 @@ internal sealed class FileLevelDirectiveParser
         [
             FileLevelDirective.Package.Descriptor,
             FileLevelDirective.Property.Descriptor,
+            FileLevelDirective.Sdk.Descriptor,
         ];
 
         Descriptors = descriptors.ToFrozenDictionary(d => d.DirectiveKind, StringComparer.Ordinal);
@@ -106,7 +107,7 @@ internal interface IPairFileLevelDirective : IFileLevelDirective
     new static abstract FileLevelDirective.IPairDescriptor Descriptor { get; }
 }
 
-internal abstract class FileLevelDirective(FileLevelDirective.ParseInfo info)
+internal abstract partial class FileLevelDirective(FileLevelDirective.ParseInfo info)
 {
     public delegate FileLevelDirective Parser(ParseInfo info);
 
@@ -872,6 +873,26 @@ internal abstract class FileLevelDirective(FileLevelDirective.ParseInfo info)
                             context.Prefer32Bit is { } b && result == default ? Platform.AnyCpu32BitPreferred : result));
                     },
                     lowercase: true),
+                Create(
+                    // Not an MSBuild property: the Portal relay which exposes servers of `#:sdk Microsoft.NET.Sdk.Web` programs.
+                    "PortalRelay",
+                    static (context, info, value) =>
+                    {
+                        if (!Uri.TryCreate(value.ToString(), UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps)
+                        {
+                            info.Errors.Add($"Invalid property value '{value}'. An https URL expected.");
+                            return default;
+                        }
+
+                        var relay = SymbolDisplay.FormatLiteral(uri.AbsoluteUri.TrimEnd('/'), quote: true);
+                        context.Config.AdditionalSources(sources => sources.Add(new()
+                        {
+                            FileName = "PortalRelay.g.cs",
+                            Text = $"[assembly: System.Reflection.AssemblyMetadata({SymbolDisplay.FormatLiteral(WebServer.RelayMetadataKey, quote: true)}, {relay})]",
+                        }));
+                        return default;
+                    },
+                    NoValues),
                 CreateBool(
                     "Prefer32Bit",
                     static (context, result) =>

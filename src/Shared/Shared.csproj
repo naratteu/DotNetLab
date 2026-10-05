@@ -1,5 +1,10 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <PropertyGroup>
+    <!-- Needed by JSImport in WebServer.cs. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
   <ItemGroup>
     <PackageReference Include="BlazorMonaco" />
     <PackageReference Include="Microsoft.AspNetCore.Components.Web" />

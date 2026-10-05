@@ -118,12 +118,16 @@ internal sealed class NuGetDownloaderPlugin(
     public Task<NuGetResults> DownloadAsync(
         Set<NuGetDependency> dependencies,
         string targetFramework,
-        bool loadForExecution)
+        bool loadForExecution,
+        string? runtimeIdentifier = null)
     {
         var parsed = "empty".Equals(targetFramework, StringComparison.OrdinalIgnoreCase)
             ? NuGetFramework.AnyFramework
             : NuGetFramework.Parse(targetFramework);
-        var filter = ActivatorUtilities.CreateInstance<LibNuGetDllFilter>(services, parsed);
+        // Runtime packs keep their DLLs under `runtimes/<rid>/lib/<tfm>/` instead of `lib/<tfm>/`.
+        NuGetDllFilter filter = runtimeIdentifier is null
+            ? ActivatorUtilities.CreateInstance<LibNuGetDllFilter>(services, parsed)
+            : new TargetFrameworkNuGetDllFilter($"runtimes/{runtimeIdentifier}/lib/{parsed.GetShortFolderName()}/", 4);
         return nuGetDownloader.Value.DownloadAsync(dependencies, parsed, filter, loadForExecution);
     }
 }

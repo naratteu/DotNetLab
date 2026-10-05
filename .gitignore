@@ -493,3 +493,7 @@ index.html
 
 # Snapshot test temporary outputs (Verify library)
 *.received.*
+
+# Built by eng/portal-bridge/build.sh.
+src/WebAssembly/wwwroot/portal/portal-bridge.wasm
+src/WebAssembly/wwwroot/portal/wasm_exec.js

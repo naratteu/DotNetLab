@@ -15,13 +15,26 @@ public static class Executor
         ImmutableArray<RefAssembly> assemblies,
         Func<object?, string>? formatScriptReturnValue = null)
     {
+        // A server from the previous run would otherwise keep answering.
+        await WebServer.StopAsync();
+
         var alc = new ExecutorLoader(assemblies);
+        bool keepLoaded = false;
         try
         {
             var assembly = alc.LoadFromStream(emitStream);
 
             var entryPoint = assembly.EntryPoint
                 ?? throw new ArgumentException("No entry point found in the assembly.");
+
+            // Programs using `#:sdk Microsoft.NET.Sdk.Web` signal when their server has started.
+            TaskCompletionSource<Func<string, string, string[], byte[], Task<(int, string[], byte[])>>>? serverStarted = null;
+            if (assembly.GetType(WebServer.ShimTypeName) != null)
+            {
+                serverStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                AppContext.SetData(WebServer.StartedKey, new Action<Func<string, string, string[], byte[], Task<(int, string[], byte[])>>>(
+                    handler => serverStarted.TrySetResult(handler)));
+            }
 
             int exitCode = 0;
             (string stdout, string stderr) = await Util.CaptureConsoleOutputAsync(
@@ -35,7 +48,22 @@ public static class Executor
                     SynchronizationContext.SetSynchronizationContext(null);
                     try
                     {
-                        var result = await InvokeEntryPointCoreAsync(entryPoint);
+                        var entryPointTask = InvokeEntryPointCoreAsync(entryPoint);
+
+                        if (serverStarted != null &&
+                            await WaitForServerAsync(entryPointTask, serverStarted.Task) is { } handler)
+                        {
+                            // The server keeps running after this run reports its output.
+                            keepLoaded = true;
+                            WebServer.Adopt(handler, alc);
+                            var relay = assembly.GetCustomAttributes<AssemblyMetadataAttribute>()
+                                .FirstOrDefault(static a => a.Key == WebServer.RelayMetadataKey)?.Value;
+                            var url = await WebServer.ExposeAsync(relay);
+                            Console.WriteLine($"info: DotNetLab[0]{Environment.NewLine}      Now listening on: {url}");
+                            return;
+                        }
+
+                        var result = await entryPointTask;
                         exitCode = result.ExitCode;
 
                         if (result is { IsScriptReturnValue: true } && formatScriptReturnValue != null)
@@ -62,7 +90,68 @@ public static class Executor
         }
         finally
         {
-            alc.Unload();
+            if (!keepLoaded)
+            {
+                AppContext.SetData(WebServer.StartedKey, null);
+                AppContext.SetData(WebServer.RunningKey, null);
+                if (AppContext.GetData(WebServer.StopKey) is Func<Task> stop)
+                {
+                    AppContext.SetData(WebServer.StopKey, null);
+                    await stop();
+                }
+
+                alc.Unload();
+            }
+        }
+    }
+
+    /// <returns>
+    /// The request handler of the started server or <see langword="null"/> if the program finished without one.
+    /// </returns>
+    private static async Task<Func<string, string, string[], byte[], Task<(int, string[], byte[])>>?> WaitForServerAsync(
+        Task entryPoint,
+        Task<Func<string, string, string[], byte[], Task<(int, string[], byte[])>>> started)
+    {
+        await Task.WhenAny(entryPoint, started);
+
+        // An intercepted `app.Run()` returns while the server is still starting.
+        if (!started.IsCompleted && entryPoint.IsCompletedSuccessfully && AppContext.GetData(WebServer.RunningKey) is Task running)
+        {
+            await Task.WhenAny(started, running);
+
+            if (!started.IsCompleted)
+            {
+                // Let the failure surface as an unhandled exception of the program.
+                await running;
+            }
+        }
+
+        // A synchronous `app.Run()` blocks on the server task, which the single-threaded browser does not support,
+        // but the server it started keeps running.
+        if (!started.IsCompleted && isBlockingRun(entryPoint))
+        {
+            await Task.WhenAny(started, Task.Delay(TimeSpan.FromSeconds(30)));
+        }
+
+        if (!started.IsCompletedSuccessfully)
+        {
+            return null;
+        }
+
+        if (entryPoint.IsFaulted && !isBlockingRun(entryPoint))
+        {
+            // Let the caller report the failure.
+            return null;
+        }
+
+        // Observe the expected exception.
+        _ = entryPoint.Exception;
+
+        return started.Result;
+
+        static bool isBlockingRun(Task task)
+        {
+            return task.IsFaulted && task.Exception.InnerException is PlatformNotSupportedException;
         }
     }
 
