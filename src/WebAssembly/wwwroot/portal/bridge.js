@@ -18,8 +18,9 @@ const pending = new Map();
 /** @type {Map<number, { onMessage: (text: boolean, data: Uint8Array) => void, onClose: (code: number, reason: string) => void }>} */
 const sockets = new Map();
 let nextId = 0;
-// Keeps the public address the same for the lifetime of this tab.
-const name = crypto.randomUUID();
+// Keeps the public address the same for the lifetime of this tab. Relays take names of at most
+// 22 characters, since an identity-bound hostname is `<name>-<40 hex address>`.
+const name = 'dotnetlab-' + Array.from(crypto.getRandomValues(new Uint8Array(10)), (b) => (b % 36).toString(36)).join('');
 
 globalThis.dotnetlabPortalHandle = (request) => new Promise((resolve) => {
     if (!onRequest) {
