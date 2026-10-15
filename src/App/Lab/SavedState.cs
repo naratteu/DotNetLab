@@ -16,6 +16,10 @@ static class WellKnownSlugs
             ("csharp", "C#", SavedState.CSharp),
             ("razor", "Razor", SavedState.Razor),
             ("cshtml", "CSHTML", SavedState.Cshtml),
+            ("webapi", "Minimal API", SavedState.MinimalApi),
+            ("blazor", "Blazor Server", SavedState.BlazorServer),
+            ("mqtt", "MQTT broker", SavedState.MqttBroker),
+            ("watson", "Watson Webserver", SavedState.Watson),
         ];
 
         ShorthandToState = entries.Select(t => KeyValuePair.Create(t.Shorthand, t.State)).ToFrozenDictionary();
@@ -252,6 +256,39 @@ internal sealed record SavedState
     {
         Inputs = [InitialCode.Cshtml.ToInputCode()],
         SelectedOutputType = "gcs",
+    };
+
+    // Web servers start right away (in the Run output), with a public address.
+
+    public static SavedState MinimalApi { get; } = defaults with
+    {
+        Inputs = [InitialCode.MinimalApi.ToInputCode()],
+        SelectedOutputType = "run",
+    };
+
+    public static SavedState BlazorServer { get; } = defaults with
+    {
+        Inputs =
+        [
+            InitialCode.BlazorProgram.ToInputCode(),
+            InitialCode.BlazorApp.ToInputCode(),
+            InitialCode.BlazorRoutes.ToInputCode(),
+            InitialCode.BlazorCounter.ToInputCode(),
+            InitialCode.RazorImports.ToInputCode(),
+        ],
+        SelectedOutputType = "run",
+    };
+
+    public static SavedState MqttBroker { get; } = defaults with
+    {
+        Inputs = [InitialCode.MqttProgram.ToInputCode(), InitialCode.MqttBrowser.ToInputCode()],
+        SelectedOutputType = "run",
+    };
+
+    public static SavedState Watson { get; } = defaults with
+    {
+        Inputs = [InitialCode.WatsonProgram.ToInputCode(), InitialCode.WatsonBrowser.ToInputCode()],
+        SelectedOutputType = "run",
     };
 
     [ProtoMember(1)]

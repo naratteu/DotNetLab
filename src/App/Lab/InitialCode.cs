@@ -1,6 +1,6 @@
 ﻿namespace DotNetLab.Lab;
 
-internal sealed record InitialCode
+internal sealed partial record InitialCode
 {
     public static readonly InitialCode CSharp = new("Program.cs", """
         using System;

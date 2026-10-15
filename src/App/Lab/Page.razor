@@ -1312,7 +1312,9 @@
     private void AutoSelectOutputType()
     {
         // Prefer C# output, or auto-select the first one available.
-        if (userSelectedOutputType is null || GetOutput(userSelectedOutputType) is null)
+        // Before the first compilation there are no outputs yet, so keep the selection loaded from the state
+        // (e.g., the Run output of web server templates).
+        if (userSelectedOutputType is null || (AllOutputs.Any() && GetOutput(userSelectedOutputType) is null))
         {
             userSelectedOutputType = AllOutputs.FirstOrDefault(o => o.Type is "cs" or "gcs")?.Type
                 ?? AllOutputs.FirstOrDefault()?.Type;

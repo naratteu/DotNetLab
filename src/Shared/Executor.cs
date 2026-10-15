@@ -30,11 +30,14 @@ public static class Executor
             var entryPoint = assembly.EntryPoint
                 ?? throw new ArgumentException("No entry point found in the assembly.");
 
-            // Programs using `#:sdk Microsoft.NET.Sdk.Web` signal when their server has started.
-            TaskCompletionSource<(Handler, SocketOpener)>? serverStarted = null;
-            if (assembly.GetType(WebServer.ShimTypeName) != null)
+            // A program becomes a server by handing its request handler to DotNetLab: any program can call
+            // `AppContext.GetData("DotNetLab.WebServer.Serve")` (e.g., the Watson template),
+            // and programs using `#:sdk Microsoft.NET.Sdk.Web` do it through their hosting shim.
+            bool isWebSdk = assembly.GetType(WebServer.ShimTypeName) != null;
+            var serverStarted = new TaskCompletionSource<(Handler, SocketOpener?)>(TaskCreationOptions.RunContinuationsAsynchronously);
+            AppContext.SetData(WebServer.ServeKey, new Action<Handler>(handler => serverStarted.TrySetResult((handler, null))));
+            if (isWebSdk)
             {
-                serverStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
                 AppContext.SetData(WebServer.StartedKey, new Action<Handler, SocketOpener>(
                     (handler, socketOpener) => serverStarted.TrySetResult((handler, socketOpener))));
                 WebServer.Prepare();
@@ -54,8 +57,7 @@ public static class Executor
                     {
                         var entryPointTask = InvokeEntryPointCoreAsync(entryPoint);
 
-                        if (serverStarted != null &&
-                            await WaitForServerAsync(entryPointTask, serverStarted.Task) is (var handler, var socketOpener))
+                        if (await WaitForServerAsync(entryPointTask, serverStarted.Task, isWebSdk) is (var handler, var socketOpener))
                         {
                             // The server keeps running after this run reports its output.
                             keepLoaded = true;
@@ -97,6 +99,7 @@ public static class Executor
             if (!keepLoaded)
             {
                 AppContext.SetData(WebServer.StartedKey, null);
+                AppContext.SetData(WebServer.ServeKey, null);
                 AppContext.SetData(WebServer.RunningKey, null);
                 AppContext.SetData(WebServer.AssetsKey, null);
                 if (AppContext.GetData(WebServer.StopKey) is Func<Task> stop)
@@ -113,9 +116,10 @@ public static class Executor
     /// <returns>
     /// The request and WebSocket handlers of the started server or <see langword="null"/> if the program finished without one.
     /// </returns>
-    private static async Task<(Handler, SocketOpener)?> WaitForServerAsync(
+    private static async Task<(Handler, SocketOpener?)?> WaitForServerAsync(
         Task entryPoint,
-        Task<(Handler, SocketOpener)> started)
+        Task<(Handler, SocketOpener?)> started,
+        bool isWebSdk)
     {
         await Task.WhenAny(entryPoint, started);
 
@@ -133,7 +137,7 @@ public static class Executor
 
         // A synchronous `app.Run()` blocks on the server task, which the single-threaded browser does not support,
         // but the server it started keeps running.
-        if (!started.IsCompleted && isBlockingRun(entryPoint))
+        if (isWebSdk && !started.IsCompleted && isBlockingRun(entryPoint))
         {
             await Task.WhenAny(started, Task.Delay(TimeSpan.FromSeconds(30)));
         }
@@ -143,7 +147,7 @@ public static class Executor
             return null;
         }
 
-        if (entryPoint.IsFaulted && !isBlockingRun(entryPoint))
+        if (entryPoint.IsFaulted && !(isWebSdk && isBlockingRun(entryPoint)))
         {
             // Let the caller report the failure.
             return null;

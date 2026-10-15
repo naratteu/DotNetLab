@@ -18,6 +18,12 @@ public static partial class WebServer
 {
     // Shared with the hosting shim compiled into the program, which can only use core library types.
     public const string StartedKey = "DotNetLab.WebServer.Started";
+
+    /// <summary>
+    /// Holds an <c>Action&lt;Func&lt;string method, string url, string[] headers, byte[] body, Task&lt;(int status, string[] headers, byte[] body)&gt;&gt;&gt;</c>
+    /// for any program to hand its HTTP request handler to (headers are flattened name/value pairs).
+    /// </summary>
+    public const string ServeKey = "DotNetLab.WebServer.Serve";
     public const string StopKey = "DotNetLab.WebServer.Stop";
     public const string RunningKey = "DotNetLab.WebServer.Running";
     public const string AssetsKey = "DotNetLab.WebServer.Assets";
@@ -63,6 +69,7 @@ public static partial class WebServer
         handler = null;
         socketOpener = null;
         AppContext.SetData(StartedKey, null);
+        AppContext.SetData(ServeKey, null);
         AppContext.SetData(StopKey, null);
         AppContext.SetData(RunningKey, null);
 
@@ -100,7 +107,7 @@ public static partial class WebServer
             assets.TryGetValue(path, out var bytes) ? ImmutableCollectionsMarshal.AsArray(bytes) : null));
     }
 
-    internal static void Adopt(Handler handler, SocketOpener socketOpener, AssemblyLoadContext loadContext)
+    internal static void Adopt(Handler handler, SocketOpener? socketOpener, AssemblyLoadContext loadContext)
     {
         WebServer.stop = AppContext.GetData(StopKey) as Func<Task>;
         WebServer.loadContext = loadContext;
